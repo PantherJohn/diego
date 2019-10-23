@@ -163,13 +163,13 @@ function relicon() {
 }
 
 function sftpmount() {
-    read osname oslogo < <(cat "${diegocache}")
+    read osname prettyname oslogo < <(cat "${diegocache}")
     for e in "$@"; do
         IFS=':' read _source _target < <(echo "$e")
         [ "${_target}" ] || _target="${diegohome}/${containerid}/${_source}"
         mkdir -p "${_target}"
 
-        socat exec:"sshfs \:${_source} -oslave -ovolname="$(uppercase ${osname})" -ovolicon="${oslogo}" ${_target}" \
+        socat exec:"sshfs \:${_source} -oslave -ovolname="${prettyname}" -ovolicon="${oslogo}" ${_target}" \
               exec:"docker exec -i ${containerid} ${sftp}" &
     done
 }
@@ -188,10 +188,10 @@ if [ "${container}" ]; then
     checkreq cdefault=install pkgs="${containereq}" executor="docker exec -i ${containerid}"
     eval "$(docker exec -i ${containerid} cat ${sysinfo[@]})"
     [ "${ID}" ] || ID="$(docker exec -i ${containerid} uname -s)"
-    echo ${ID} $(relicon ${ID}) > "${diegocache}"
+    echo ${ID} $(echo ${NAME} | awk '{print $1}') $(relicon ${ID}) > "${diegocache}"
 
     sftpmount ${rvolumes}
-fi
+fi >/dev/null 2>&1
 
 if [ "${containerid}" ]; then
     if ! $(instinfo running ${containerid}); then
