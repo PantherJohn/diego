@@ -1,0 +1,13 @@
+# .diegorc
+
+shell bash
+usergroup root root
+
+%% default name:default  # name/instanceid
+shell bash
+initializer "/sbin/init"
+usergroup root root
+image centos:latest
+hostname jared
+sftpserver /usr/libexec/openssh/sftp-server
+mount /Volumes:{/mnt/Volumes} {/} #{/}:/tmp/whoa

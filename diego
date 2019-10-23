@@ -1,0 +1,203 @@
+#!/bin/bash
+name=$(basename -- "$0")
+version=""
+description="Docker Diego, cross-platform shell"; copyright=""
+diegorc=~/.diegorc
+diegohome=$HOME/.diego/
+diegocache=.cache
+
+brewsrc="https://raw.githubusercontent.com/Homebrew/install/master/install"
+icnsrepo="https://raw.githubusercontent.com/PantherJohn/diego/master/logos"
+
+install=false
+available=false
+containerid=""; container=""
+# pre-install packages ######
+containereq="dnf,yum,apt-get:openssh-server"
+#############################
+volumes=""; options=""
+hostnetwork=false
+daemon=false
+reload=false; savestate=true
+hostname=""
+
+cnotfound=127
+ansi() { echo -e "\e[${1}m${@:2}\e[0m"; }
+red() { ansi 31 "$@"; }
+error() { red $@ >&2; }
+info() { echo -e "$@"; }
+strip() { awk -F"[$@]" '{print $2}'; }
+exists() { eval $@; (( $? == ${cnotfound} )); } >/dev/null 2>&1
+sethome() { mkdir $@; cd $@; } >/dev/null 2>&1
+lowercase() { for e in $@; do echo $e | tr '[:upper:]' '[:lower:]'; done; }
+uppercase() { for e in $@; do echo $(tr '[:lower:]' '[:upper:]' <<< ${e:0:1})${e:1}; done; }
+
+function usage() {
+    [ "${description}" ] && echo "${description}" $([ "${version}" ] && echo ${version})
+    [ "${copyright}" ] && echo "(c) copyright ${copyright}"
+    echo usage: ${name} 'container [--name container] [-u user]'\
+            '[--group group] [--privileged] [-c config] [-r|--reload]'
+}
+
+function instinfo() {
+    query='docker inspect -f'
+    opt="$1"; shift
+    case ${opt} in
+        id)   ${query} '{{.Id}}' $@ ;;
+        name) ${query} '{{.Name}}' $@ | cut -c2- ;;
+        running) ${query} '{{.State.Running}}' $@ ;;
+        *)    ${query} $@ ;;
+    esac
+}
+
+function checkreq() {
+    cdefault=install; executor=eval
+    eval $*; [[ "${pkgman}" ]] && {
+        exists ${pkgman} || ${executor} source < <(eval ${from})
+    };
+    [ "${pkgs}" ] && {
+        for e in "${pkgs}"; do
+            read -d':' pkgmans pkglist < <(echo "${e}")
+            (
+                IFS=','; for pkgman in "${pkgmans}"; do
+                    if exists ${pkgman}; then
+                        for pkg in ${pkglist}; do
+                            read -d':' subset pkgname < <(echo "${pkg}")
+                            [ "${subset}" ] || { pkgname="${subset}"; subset=''; }
+                            ${executor} "${pkgman} ${subset} ${cdefault} ${pkgname}"
+                        done; break
+                    fi
+                done
+            )
+        done
+    }
+}
+
+sethome ${diegohome}
+install=$([ ! -f "${diegocache}" ] && echo true || echo false)
+
+if ${install}; then
+    brewsrc="${brewsrc}"
+    checkreq cdefault=install pkgman=brew \
+        from="curl -fsSL ${brewsrc}" \
+        pkgs="brew:cask:osxfuse,sshfs,docker"
+fi
+
+open -a Docker -gj
+until docker ps >/dev/null 2>&1; do true; done
+
+while true; do
+    case "$1" in
+        -c)
+            shift; diegorc="$1" ;;
+        -d|--daemon) daemon=true ;;
+        -u|--user)
+            shift; user="$1" ;;
+        --group)
+            shift; group="$1" ;;
+        --privileged)
+            privileged="$1" ;;
+        --name)
+            shift; containerid=$(instinfo id "$1") ;;
+        --init) install=true ;;
+        -r|--reload) reload=true ;;
+        -h|--help) usage; exit 0 ;;
+        '') break ;;
+        *)  containerid="$1" ;;
+    esac; shift
+done
+
+set --
+while IFS="" read -r p || [ -n "$p" ]; do
+    line="${p%'#'*}"; [ "${line}" ] && eval set ${line}
+    option="$1"; shift
+    case ${option} in
+        '%%')
+            ${available} && break
+            for e in "$@"; do
+                case $e in
+                    'default') available=true ;;
+                    *)  IFS=':' read t idname < <(echo "$e")
+                        case $t in
+                            'id') id=${idname} ;;
+                            'name')
+                                id="$(instinfo id ${idname})"
+                                [ "${id}" ] || {
+                                    container="${idname}"; available=true
+                                    continue
+                                } ;;
+                        esac
+
+                        [ "${containerid}" ] && {
+                            [ "${id}" == "${containerid}" ] && available=true
+                        } || containerid="${id}" ;;
+                esac
+            done ;;
+        'shell') pshell="$@" ;;
+        'initializer') initializer="$@" ;;
+        'image') image="$@" ;;
+        'hostname') hostname="$@" ;;
+        'usergroup') ;;
+        'sftpserver') sftp="$@";;
+        'mount')
+            signature="{}"
+            for v in "$@"; do
+                IFS=':' read _source _target < <(echo "$v")
+                _source_="$(echo "${_source}" | strip ${signature})"
+                _target_="$(echo "${_target}" | strip ${signature})"
+
+                if [ "${_source_}" ]; then
+                    rvolumes="${rvolumes} ${_source_}:${_target_}"
+                else
+                    volumes="${volumes} -v $([ "${_target_}" ] && echo "${_source}:${_target_}" || echo "$v")"
+                fi
+            done ;;
+        'options') options="$@" ;;
+    esac
+done < "${diegorc}"
+
+function relicon() {
+    iconloc=".volicon"
+    curl -fsL -o "${iconloc}" "${icnsrepo}/$(lowercase "$@").icns"
+    echo $(realpath "${iconloc}")
+}
+
+function sftpmount() {
+    read osname oslogo < <(cat "${diegocache}")
+    for e in "$@"; do
+        IFS=':' read _source _target < <(echo "$e")
+        [ "${_target}" ] || _target="${diegohome}/${containerid}/${_source}"
+        mkdir -p "${_target}"
+
+        socat exec:"sshfs \:${_source} -oslave -ovolname="$(uppercase ${osname})" -ovolicon="${oslogo}" ${_target}" \
+              exec:"docker exec -i ${containerid} ${sftp}" &
+    done
+}
+
+if ${reload} && [ "${containerid}" ] && {
+    container=$(instinfo name ${containerid})
+    ${savestate} && docker commit ${containerid} ${image}
+}; then docker rm -f ${containerid}; fi >/dev/null 2>&1
+
+if [ "${container}" ]; then
+    containerid=$(docker run --name "${container}" $([ "${hostname}" ] && echo "-h ${hostname}") \
+                    -d ${privileged} ${volumes} $(${hostnetwork} && echo '--network host' || echo '-P') \
+                    ${options} ${image} "${initializer}")
+
+    sysinfo=('/etc/os-release' '/usr/lib/os-release')
+    checkreq cdefault=install pkgs="${containereq}" executor="docker exec -i ${containerid}"
+    eval "$(docker exec -i ${containerid} cat ${sysinfo[@]})"
+    [ "${ID}" ] || ID="$(docker exec -i ${containerid} uname -s)"
+    echo ${ID} $(relicon ${ID}) > "${diegocache}"
+
+    sftpmount ${rvolumes}
+fi
+
+if [ "${containerid}" ]; then
+    if ! $(instinfo running ${containerid}); then
+        docker start ${containerid}; sftpmount ${rvolumes}
+    fi >/dev/null 2>&1
+
+    ${daemon} || docker exec -it ${privileged} ${containerid} "${pshell}"
+    #[ $(docker ps -q) ] || osascript -e 'quit app "Docker"'
+fi
