@@ -1,0 +1,26 @@
+#!/bin/bash
+#
+# svg2icns
+# - convert SVG file(s) to macOS icon (icns) format
+# original author - @adriansr
+#
+function svg2icns() {
+    sizes="16:16x16 32:16x16@2x 32:32x32
+           64:32x32@2x 128:128x128
+           256:128x128@2x 256:256x256
+           512:256x256@2x 512:512x512
+           1024:512x512@2x"
+
+    for e in "$@"; do
+        iconset="${e%.*}.iconset"
+        mkdir -p "${iconset}"
+        for params in ${sizes}; do
+            IFS=':' read size label < <(echo "${params}")
+            convert -background none -resize "!${size}x${size}" "${e}" "${iconset}"/icon_${label}.png
+        done
+
+        iconutil -c icns "${iconset}"; rm -rf "${iconset}"
+    done
+}
+
+svg2icns $@
