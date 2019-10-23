@@ -51,20 +51,21 @@ function instinfo() {
 }
 
 function checkreq() {
-    cdefault=install; executor=eval
-    eval $*; [[ "${pkgman}" ]] && {
-        exists ${pkgman} || ${executor} source < <(eval ${from})
+    cdefault=install
+    for e in "$@"; do eval $(printf '%q' "$e"); done
+    [ "${pkgman}" ] && {
+        exists ${pkgman} || eval ${executor} source < <(eval ${from})
     };
     [ "${pkgs}" ] && {
-        for e in "${pkgs}"; do
-            read -d':' pkgmans pkglist < <(echo "${e}")
+        for e in ${pkgs}; do
+            IFS=$':' read pkgmans pkglist <<< "$e"
             (
-                IFS=','; for pkgman in "${pkgmans}"; do
+                IFS=$','; for pkgman in ${pkgmans}; do
                     if exists ${pkgman}; then
                         for pkg in ${pkglist}; do
-                            read -d':' subset pkgname < <(echo "${pkg}")
-                            [ "${subset}" ] || { pkgname="${subset}"; subset=''; }
-                            ${executor} "${pkgman} ${subset} ${cdefault} ${pkgname}"
+                            IFS=$':' read subset pkgname < <(echo "${pkg}")
+                            [ "${pkgname}" ] || { pkgname="${subset}"; subset=''; }
+                            eval ${executor} "${pkgman} ${subset} ${cdefault} ${pkgname}"
                         done; break
                     fi
                 done
@@ -117,7 +118,7 @@ while IFS="" read -r p || [ -n "$p" ]; do
             for e in "$@"; do
                 case $e in
                     'default') available=true ;;
-                    *)  IFS=':' read t idname < <(echo "$e")
+                    *)  IFS=':' read t idname <<< "$e"
                         case $t in
                             'id') id=${idname} ;;
                             'name')
@@ -142,7 +143,7 @@ while IFS="" read -r p || [ -n "$p" ]; do
         'mount')
             signature="{}"
             for v in "$@"; do
-                IFS=':' read _source _target < <(echo "$v")
+                IFS=':' read _source _target <<< "$v"
                 _source_="$(echo "${_source}" | strip ${signature})"
                 _target_="$(echo "${_target}" | strip ${signature})"
 
@@ -157,7 +158,7 @@ while IFS="" read -r p || [ -n "$p" ]; do
 done < "${diegorc}"
 
 function relicon() {
-    iconloc=".volicon"
+    iconloc=".volicon"; rm -f "${iconloc}"
     curl -fsL -o "${iconloc}" "${icnsrepo}/$(lowercase "$@").icns"
     echo $(realpath "${iconloc}")
 }
@@ -165,14 +166,15 @@ function relicon() {
 function sftpmount() {
     read osname prettyname oslogo < <(cat "${diegocache}")
     for e in "$@"; do
-        IFS=':' read _source _target < <(echo "$e")
+        IFS=':' read _source _target <<< "$e"
         [ "${_target}" ] || _target="${diegohome}/${containerid}/${_source}"
         mkdir -p "${_target}"
 
-        socat exec:"sshfs \:${_source} -oslave -ovolname="${prettyname}" -ovolicon="${oslogo}" ${_target}" \
+        socat exec:"sshfs \:${_source} -oslave -ovolname="${prettyname}" \
+                    $([ -f "${oslogo}" ] && echo "-ovolicon="${oslogo}"") ${_target}" \
               exec:"docker exec -i ${containerid} ${sftp}" &
     done
-}
+} >/dev/null 2>&1
 
 if ${reload} && [ "${containerid}" ] && {
     container=$(instinfo name ${containerid})

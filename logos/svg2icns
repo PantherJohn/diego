@@ -16,7 +16,8 @@ function svg2icns() {
         mkdir -p "${iconset}"
         for params in ${sizes}; do
             IFS=':' read size label < <(echo "${params}")
-            convert -background none -resize "!${size}x${size}" "${e}" "${iconset}"/icon_${label}.png
+            convert -background none -resize "${size}x${size}" \
+                -gravity center -extent "${size}x${size}" "${e}" "${iconset}"/icon_${label}.png
         done
 
         iconutil -c icns "${iconset}"; rm -rf "${iconset}"
