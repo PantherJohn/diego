@@ -9,28 +9,31 @@ diegocache=.cache
 brewsrc="https://raw.githubusercontent.com/Homebrew/install/master/install"
 icnsrepo="https://raw.githubusercontent.com/PantherJohn/diego/master/logos"
 
-install=false
 available=false
-containerid=""; container=""
+dcontainer="default"; container=""
 # pre-install packages ######
-containereq="dnf,yum,apt-get:openssh-server"
+hostreq="brew:cask:osxfuse,sshfs,docker,openssh"
+containereq="dnf,yum,apt-get:openssh-server dnf,apt-get:sshfs yum:fuse-sshfs brew:openssh,sshfs"
 #############################
-volumes=""; options=""
+options=""
 hostnetwork=false
 daemon=false
-reload=false; savestate=true
+reset=false; reload=false
+savestate=true
+contextual=false
+remount=false
 hostname=""
 
-cnotfound=127
 ansi() { echo -e "\e[${1}m${@:2}\e[0m"; }
 red() { ansi 31 "$@"; }
 error() { red $@ >&2; }
 info() { echo -e "$@"; }
 strip() { awk -F"[$@]" '{print $2}'; }
-exists() { eval $@; (( $? == ${cnotfound} )); } >/dev/null 2>&1
+exists() { ${executor} hash $@; } >/dev/null 2>&1
 sethome() { mkdir $@; cd $@; } >/dev/null 2>&1
 lowercase() { for e in $@; do echo $e | tr '[:upper:]' '[:lower:]'; done; }
 uppercase() { for e in $@; do echo $(tr '[:lower:]' '[:upper:]' <<< ${e:0:1})${e:1}; done; }
+savevars() { for var in "$@"; do printf '%s="%s";' "${var}" "${!var}"; done; }
 
 function usage() {
     [ "${description}" ] && echo "${description}" $([ "${version}" ] && echo ${version})
@@ -46,15 +49,18 @@ function instinfo() {
         id)   ${query} '{{.Id}}' $@ ;;
         name) ${query} '{{.Name}}' $@ | cut -c2- ;;
         running) ${query} '{{.State.Running}}' $@ ;;
+        eq)   [ "$1" == "$2" ] || \
+              [ "$1" == "$(instinfo id $2)" ] || \
+              [ "$2" == "$(instinfo id $1)" ] || \
+              [ "$(instinfo id $1)" == "$(instinfo id $2)" ] ;;
         *)    ${query} $@ ;;
     esac
-}
+} 2>/dev/null
 
 function checkreq() {
-    cdefault=install
-    for e in "$@"; do eval $(printf '%q' "$e"); done
+    [ "${cdefault}" ] && cdefault=install
     [ "${pkgman}" ] && {
-        exists ${pkgman} || eval ${executor} source < <(eval ${from})
+        exists ${pkgman} || ${executor} source < <(eval ${from})
     };
     [ "${pkgs}" ] && {
         for e in ${pkgs}; do
@@ -63,9 +69,9 @@ function checkreq() {
                 IFS=$','; for pkgman in ${pkgmans}; do
                     if exists ${pkgman}; then
                         for pkg in ${pkglist}; do
-                            IFS=$':' read subset pkgname < <(echo "${pkg}")
+                            IFS=$':' read subset pkgname <<< "${pkg}"
                             [ "${pkgname}" ] || { pkgname="${subset}"; subset=''; }
-                            eval ${executor} "${pkgman} ${subset} ${cdefault} ${pkgname}"
+                            ${executor} "${pkgman}" "${subset}" "${cdefault}" "${pkgname}"
                         done; break
                     fi
                 done
@@ -74,14 +80,84 @@ function checkreq() {
     }
 }
 
-sethome ${diegohome}
-install=$([ ! -f "${diegocache}" ] && echo true || echo false)
+function dcexec() {
+    [ "${container}" ] || return 1
+    echo -n "docker exec -i ${container} $@"
+}
 
-if ${install}; then
-    brewsrc="${brewsrc}"
-    checkreq cdefault=install pkgman=brew \
-        from="curl -fsSL ${brewsrc}" \
-        pkgs="brew:cask:osxfuse,sshfs,docker"
+function searchexec() {
+    target="$1"; shift; cmd="$@"
+    exists ${target} && { echo ${executor} ${target} ${cmd}; return; }
+
+    searchpath="$(${executor} printenv PATH):${exclude}"
+    echo ${executor} $(eval ${executor} find / -type f -name "${target}" -prune \
+        $(IFS=$':'; printf '! -path "%q/\*" ' ${searchpath}) -print -quit | head -n1) ${cmd}
+} 2>/dev/null
+
+function relicon() {
+    iconloc=".volicon"; rm -f "${iconloc}"
+    curl -fsL -o "${iconloc}" "${icnsrepo}/$(lowercase "$@").icns"
+    echo -n $(realpath "${iconloc}")
+}
+
+function sftpmount() {
+    [ "${reverse}" ] || reverse=false
+
+    function ismounted() {
+        directory="$(${executor} realpath $@)"
+        ${executor} mount | grep -q -- "${directory}" >/dev/null 2>&1
+    }
+
+    function execute() {
+        mode="$1"; print=false; shift; cmd="$@"
+        while read -n1 m; do
+            case ${m} in
+                'p') print=true ;;
+                't') ${reverse} || cmd="$(dcexec $@)" ;;
+                's') ${reverse} && cmd="$(dcexec $@)" ;;
+            esac
+        done <<< "${mode}"
+        ${print} && echo -n "${cmd}" || eval ${cmd}
+    }
+
+    for opts in ${mount_opts}; do
+        IFS=$':' read _type_ opts <<< "${opts}"
+        case "${_type_}" in
+            'host')  ${reverse} || continue ;;
+            'guest') ${reverse} && continue ;;
+            '') ;;
+        esac
+        sshfs_opts="${sshfs_opts} $(IFS=$','; printf ' -o%s' ${opts})"
+    done
+
+    _targets=""
+    for e in "$@"; do
+        IFS=':' read _source _target <<< "$e"
+        [ "${_target}" ] || _target="${diegohome}/${container}/${_source}"
+
+        ${reverse} || mounts="${mounts} ${_source}:${_target}"
+        executor="$(execute pt)" ismounted ${_target} && continue
+
+        execute t mkdir -p "${_target}"
+        _targets="${_targets}:${_target}"
+
+        socat exec:"$(execute pt "sshfs \:${_source} ${sshfs_opts} ${_target}")" \
+              exec:"$(executor="$(execute ps)" exclude="${_targets:1}" searchexec sftp-server)",nofork,pipes \
+              >/dev/null 2>&1 &
+    done
+} >/dev/null 2>&1
+
+function mountall() {
+    mounts=""
+    mount_opts=":slave,async_read host:volname="${prettyname}",$(
+                [ -f "${oslogo}" ] && printf "volicon="${oslogo}"")"
+    sftpmount ${volumes}; reverse=true sftpmount ${rvolumes}
+}
+
+currdir="$(pwd)"
+sethome ${diegohome}
+if ! source ${diegocache} >/dev/null 2>&1; then
+    pkgman=brew from="curl -fsSL ${brewsrc}" pkgs="${hostreq}" checkreq
 fi
 
 open -a Docker -gj
@@ -98,108 +174,100 @@ while true; do
             shift; group="$1" ;;
         --privileged)
             privileged="$1" ;;
-        --name)
-            shift; containerid=$(instinfo id "$1") ;;
-        --init) install=true ;;
         -r|--reload) reload=true ;;
+        --contextual) contextual=true ;;
         -h|--help) usage; exit 0 ;;
         '') break ;;
-        *)  containerid="$1" ;;
+        *)  dcontainer="$1" ;;
     esac; shift
 done
 
-set --
-while IFS="" read -r p || [ -n "$p" ]; do
-    line="${p%'#'*}"; [ "${line}" ] && eval set ${line}
-    option="$1"; shift
-    case ${option} in
-        '%%')
-            ${available} && break
-            for e in "$@"; do
-                case $e in
-                    'default') available=true ;;
-                    *)  IFS=':' read t idname <<< "$e"
-                        case $t in
-                            'id') id=${idname} ;;
-                            'name')
-                                id="$(instinfo id ${idname})"
-                                [ "${id}" ] || {
-                                    container="${idname}"; available=true
-                                    continue
-                                } ;;
-                        esac
+container=$(instinfo name ${dcontainer})
+if [ ! "${container}" ] || ${reload}; then
+    set --
+    while IFS="" read -r p || [ -n "$p" ]; do
+        line="${p%'#'*}"; [ "${line}" ] && eval set ${line}
+        keyword="$1"; shift
+        case ${keyword} in
+            '%%')
+                ${available} && break
+                for e in "$@"; do
+                    case $e in
+                        'default') available=true ;;
+                        *) IFS=':' read t idname <<< "$e"
+                           instinfo eq ${idname} ${dcontainer} && available=true ;;
+                    esac
+                done ;;
+            'shell') pshell="$@" ;;
+            'initializer') initializer="$@" ;;
+            'image') image="$@" ;;
+            'hostname') hostname="$@" ;;
+            'usergroup') ;;
+            'mount')
+                signature="{}"
+                for v in "$@"; do
+                    IFS=':' read _source _target <<< "$v"
+                    _source_="$(echo "${_source}" | strip ${signature})"
+                    _target_="$(echo "${_target}" | strip ${signature})"
 
-                        [ "${containerid}" ] && {
-                            [ "${id}" == "${containerid}" ] && available=true
-                        } || containerid="${id}" ;;
-                esac
-            done ;;
-        'shell') pshell="$@" ;;
-        'initializer') initializer="$@" ;;
-        'image') image="$@" ;;
-        'hostname') hostname="$@" ;;
-        'usergroup') ;;
-        'sftpserver') sftp="$@";;
-        'mount')
-            signature="{}"
-            for v in "$@"; do
-                IFS=':' read _source _target <<< "$v"
-                _source_="$(echo "${_source}" | strip ${signature})"
-                _target_="$(echo "${_target}" | strip ${signature})"
+                    [ "${_source_}" ] && rvolumes="${rvolumes} ${_source_}:${_target_}" \
+                                      || volumes="${volumes} $([ "${_target_}" ] && echo "${_source}:${_target_}" || echo "$v")"
+                done ;;
+            'options') options="$@" ;;
+        esac
+    done < "${diegorc}"
+    remount=true
+fi
 
-                if [ "${_source_}" ]; then
-                    rvolumes="${rvolumes} ${_source_}:${_target_}"
-                else
-                    volumes="${volumes} -v $([ "${_target_}" ] && echo "${_source}:${_target_}" || echo "$v")"
-                fi
-            done ;;
-        'options') options="$@" ;;
-    esac
-done < "${diegorc}"
-
-function relicon() {
-    iconloc=".volicon"; rm -f "${iconloc}"
-    curl -fsL -o "${iconloc}" "${icnsrepo}/$(lowercase "$@").icns"
-    echo $(realpath "${iconloc}")
-}
-
-function sftpmount() {
-    read osname prettyname oslogo < <(cat "${diegocache}")
-    for e in "$@"; do
-        IFS=':' read _source _target <<< "$e"
-        [ "${_target}" ] || _target="${diegohome}/${containerid}/${_source}"
-        mkdir -p "${_target}"
-
-        socat exec:"sshfs \:${_source} -oslave -ovolname="${prettyname}" \
-                    $([ -f "${oslogo}" ] && echo "-ovolicon="${oslogo}"") ${_target}" \
-              exec:"docker exec -i ${containerid} ${sftp}" &
-    done
-} >/dev/null 2>&1
-
-if ${reload} && [ "${containerid}" ] && {
-    container=$(instinfo name ${containerid})
-    ${savestate} && docker commit ${containerid} ${image}
-}; then docker rm -f ${containerid}; fi >/dev/null 2>&1
-
-if [ "${container}" ]; then
-    containerid=$(docker run --name "${container}" $([ "${hostname}" ] && echo "-h ${hostname}") \
-                    -d ${privileged} ${volumes} $(${hostnetwork} && echo '--network host' || echo '-P') \
-                    ${options} ${image} "${initializer}")
-
-    sysinfo=('/etc/os-release' '/usr/lib/os-release')
-    checkreq cdefault=install pkgs="${containereq}" executor="docker exec -i ${containerid}"
-    eval "$(docker exec -i ${containerid} cat ${sysinfo[@]})"
-    [ "${ID}" ] || ID="$(docker exec -i ${containerid} uname -s)"
-    echo ${ID} $(echo ${NAME} | awk '{print $1}') $(relicon ${ID}) > "${diegocache}"
-
-    sftpmount ${rvolumes}
+if [ ! "${container}" ] || {
+    ${reset} && {
+        container=$(instinfo name ${container})
+        ${savestate} && docker commit ${container} ${image}
+    } && docker rm -f ${container}
+} >/dev/null 2>&1; then
+    if ! container=$(docker run --name "${dcontainer}" \
+        $([ "${hostname}" ] && echo "-h ${hostname}") \
+        -d ${privileged} $(${hostnetwork} && echo '--network host' || echo '-P') \
+        ${options} ${image} "${initializer}"); then
+        exit 1
+    fi
+    remount=true
 fi >/dev/null 2>&1
 
-if [ "${containerid}" ]; then
-    if ! $(instinfo running ${containerid}); then
-        docker start ${containerid}; sftpmount ${rvolumes}
+if [ "${container}" ]; then
+    if ! $(instinfo running ${container}); then
+        remount=true
+        docker start ${container}
     fi >/dev/null 2>&1
 
-    ${daemon} || docker exec -it ${privileged} ${containerid} "${pshell}"
-    #[ $(docker ps -q) ] || osascript -e 'quit app "Docker"'
+    if ${reload}; then
+        sysinfo=('/etc/os-release' '/usr/lib/os-release')
+        executor="$(dcexec)" pkgs="${containereq}" checkreq
+        eval "$(dcexec cat ${sysinfo[@]})"
+        [ "${ID}" ] || ID="$(dcexec uname -s)"
+
+        osname="${ID}"
+        prettyname="$(echo ${NAME} | awk '{print $1}')"
+        oslogo="$(relicon ${ID})"
+        remount=true
+    fi
+
+    ${remount} && mountall
+
+    if ${contextual}; then
+        for mountpoint in ${mounts}; do
+            IFS=':' read _source _target <<< "${mountpoint}"
+            if [[ "${currdir}" =~ "${_source}" ]]; then
+                workdir="-w ${_target}/${currdir}"
+                break
+            fi
+        done
+    fi
+
+    savevars diegorc container pshell \
+        mounts osname prettyname oslogo > ${diegocache}
+
+    if ! ${daemon}; then
+        docker exec -it ${privileged} ${workdir} ${container} "${pshell}"
+    fi
 fi
